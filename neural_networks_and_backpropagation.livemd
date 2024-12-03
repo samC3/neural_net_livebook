@@ -1,0 +1,556 @@
+# Andrej Karpathy: Intro to NN and Backpropagation
+
+```elixir
+Mix.install([
+  {:nx, "~> 0.9.2"},
+  {:kino, "~> 0.14.2"},
+  {:kino_vega_lite, "~> 0.1.11"}
+])
+```
+
+## Derivative of a simple function
+
+```elixir
+f = fn x -> 3 * x ** 2 - 4 * x + 5 end
+```
+
+```elixir
+xs = for i <- 1..40, do: -5.0 + (0.25 * i)
+ys = Enum.map(xs, &f.(&1))
+
+data = %{x: xs, y: ys}
+```
+
+<!-- livebook:{"attrs":"eyJjaGFydF90aXRsZSI6bnVsbCwiaGVpZ2h0Ijo0MDAsImxheWVycyI6W3siYWN0aXZlIjp0cnVlLCJjaGFydF90eXBlIjoibGluZSIsImNvbG9yX2ZpZWxkIjpudWxsLCJjb2xvcl9maWVsZF9hZ2dyZWdhdGUiOm51bGwsImNvbG9yX2ZpZWxkX2JpbiI6bnVsbCwiY29sb3JfZmllbGRfc2NhbGVfc2NoZW1lIjpudWxsLCJjb2xvcl9maWVsZF90eXBlIjpudWxsLCJkYXRhX3ZhcmlhYmxlIjoiZGF0YSIsImdlb2RhdGFfY29sb3IiOiJibHVlIiwibGF0aXR1ZGVfZmllbGQiOm51bGwsImxvbmdpdHVkZV9maWVsZCI6bnVsbCwieF9maWVsZCI6IngiLCJ4X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieF9maWVsZF9iaW4iOm51bGwsInhfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieF9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIiwieV9maWVsZCI6InkiLCJ5X2ZpZWxkX2FnZ3JlZ2F0ZSI6bnVsbCwieV9maWVsZF9iaW4iOm51bGwsInlfZmllbGRfc2NhbGVfdHlwZSI6bnVsbCwieV9maWVsZF90eXBlIjoicXVhbnRpdGF0aXZlIn1dLCJ2bF9hbGlhcyI6IkVsaXhpci5WZWdhTGl0ZSIsIndpZHRoIjo0MDB9","chunks":null,"kind":"Elixir.KinoVegaLite.ChartCell","livebook_object":"smart_cell"} -->
+
+```elixir
+VegaLite.new(width: 400, height: 400)
+|> VegaLite.data_from_values(data, only: ["x", "y"])
+|> VegaLite.mark(:line)
+|> VegaLite.encode_field(:x, "x", type: :quantitative)
+|> VegaLite.encode_field(:y, "y", type: :quantitative)
+```
+
+The derivative of the curve, i.e. the slope of the curve. [Wikipedia](https://en.wikipedia.org/wiki/Derivative#:~:text=In%20mathematics%2C%20the%20derivative%20is,the%20function%20at%20that%20point.)
+
+```elixir
+h = 0.00000001 
+x = 2/3
+(f.(x + h) - f.(x)) / h
+```
+
+```elixir
+a = 2.0
+b = -3.0
+c = 10.0
+d = a * b + c
+```
+
+```elixir
+h = 0.0001
+
+a = 2.0
+b = -3.0
+c = 10.0
+
+d1 = a * b + c
+b = b + h
+d2 = a * b + c
+
+"d1: #{d1}, d2: #{d2}, slope: #{(d2 - d1) / h}"
+```
+
+## Starting the core value "object"
+
+```elixir
+a = Nx.tensor(2.0)
+b = Nx.tensor(-3.0)
+c = Nx.tensor(10.0)
+
+d = Nx.multiply(a, b) |> Nx.add(c)
+```
+
+```elixir
+defmodule Value do
+  defstruct [
+    :data,
+    :children,
+    :op,
+    :label,
+    :grad
+  ]
+
+  @type t :: %__MODULE__{
+    data: float(),
+    children: {__MODULE__.t(), __MODULE__.t()},
+    op: String.t(),
+    label: String.t(),
+    grad: float()
+  }
+
+  def add(value_one, value_two, label) do
+    %__MODULE__{
+      data: value_one.data + value_two.data,
+      children: {value_one, value_two},
+      op: "add",
+      label: label
+    }
+  end
+
+  def mult(value_one, value_two, label) do
+    %__MODULE__{
+      data: value_one.data * value_two.data,
+      children: {value_one, value_two},
+      op: "mult",
+      label: label
+    }
+  end
+
+  def tanh(value, label) do
+    x = value.data
+    t = (:math.exp(2 * x) - 1) / (:math.exp(2 * x) + 1)
+    
+    %__MODULE__{
+      data: t,
+      children: {value, nil},
+      op: "tanh",
+      label: label
+    }
+  end
+
+  def backward(%__MODULE__{children: nil} = result), do: result
+  
+  def backward(%__MODULE__{op: "add", children: {val_one, val_two}} = result) do
+    val_one_grad = 1.0 * result.grad
+    val_two_grad = 1.0 * result.grad
+    
+    %__MODULE__{
+      result | children: {
+        %__MODULE__{val_one | grad: (val_one.grad || 0.0) + val_one_grad} |> Value.backward(),
+        %__MODULE__{val_two | grad: (val_two.grad || 0.0) + val_two_grad} |> Value.backward()
+      } 
+    }
+  end
+  
+  def backward(%__MODULE__{op: "mult", children: {val_one, val_two}} = result) do
+    val_one_grad = val_two.data * result.grad
+    val_two_grad = val_one.data * result.grad
+    
+    %__MODULE__{
+      result | children: {
+        %__MODULE__{val_one | grad: (val_one.grad || 0.0) + val_one_grad} |> Value.backward(),
+        %__MODULE__{val_two | grad: (val_two.grad || 0.0) + val_two_grad} |> Value.backward()
+      } 
+    }
+  end
+  
+  def backward(%__MODULE__{op: "tanh", children: {val, nil}} = result) do
+    val_grad = (1 - result.data ** 2) * result.grad
+
+    %__MODULE__{
+      result | children: {
+        %__MODULE__{val | grad: (val.grad || 0.0) + val_grad} |> Value.backward(),
+        nil
+      }
+    }
+  end
+end
+```
+
+```elixir
+a = %Value{data: 2.0, label: "a"}
+b = %Value{data: -3.0, label: "b"}
+c = %Value{data: 10.0, label: "c"}
+e = Value.mult(a, b, "e")
+d = Value.add(e, c, "d")
+```
+
+```elixir
+defmodule Mermaid do
+  def render_value(value) do
+    """
+    flowchart LR
+    #{Mermaid.to_mermaid(value)}
+    """
+    |> Kino.Mermaid.new()
+  end
+
+  def to_mermaid(nil), do: ""
+  
+  def to_mermaid(%{children: nil} = value) do
+    value_node(value)
+  end
+
+  def to_mermaid(%{children: {left, nil}, op: op} = value) do
+    # Since the + and * operators are used multiple times we
+    # need a unique name so the flow chart works.
+    i = Enum.random(1..1000)
+    
+    """
+    #{to_mermaid(left)} --> #{i}[#{op}]
+    #{i}[#{op}] --> #{value_node(value)}
+    """
+  end
+  
+  def to_mermaid(%{children: {left, right}, op: op} = value) do
+    i = Enum.random(1..1000)
+    
+    """
+    #{to_mermaid(left)} --> #{i}[#{op}]
+    #{to_mermaid(right)} --> #{i}[#{op}]
+    #{i}[#{op}] --> #{value_node(value)}
+    """
+  end
+
+  def value_node(%{data: data, label: label, grad: grad}) do
+    """
+    #{label}[#{label}
+    data: #{data}
+    grad: #{grad}]
+    """
+  end
+end
+
+```
+
+```elixir
+Mermaid.render_value(d)
+```
+
+```elixir
+a = %Value{data: 2.0, label: "a"}
+b = %Value{data: -3.0, label: "b"}
+c = %Value{data: 10.0, label: "c"}
+e = Value.mult(a, b, "e")
+d = Value.add(e, c, "d")
+f = %Value{data: -2.0, label: "f"}
+l = Value.mult(d, f, "L")
+
+Mermaid.render_value(l)
+```
+
+### Manual back propagation
+
+Calculate the gradient using calculus derivates
+
+$ \frac{f(a + h) - f(a)}{h} $
+
+```elixir
+defmodule ManualGradCalc do
+  def lol() do
+    h = 0.0001
+    
+    a = %Value{data: 2.0, label: "a"}
+    b = %Value{data: -3.0, label: "b"}
+    c = %Value{data: 10.0, label: "c"}
+    e = Value.mult(a, b, "e")
+    d = Value.add(e, c, "d")
+    f = %Value{data: -2.0, label: "f"}
+    l = Value.mult(d, f, label: "L")
+    l1 = l.data
+
+    a = %Value{data: 2.0 + h, label: "a"}
+    b = %Value{data: -3.0, label: "b"}
+    c = %Value{data: 10.0, label: "c"}
+    e = Value.mult(a, b, "e")
+    d = Value.add(e, c, "d")
+    f = %Value{data: -2.0, label: "f"}
+    l = Value.mult(d, f, label: "L")
+    l2 = l.data
+
+    (l2 - l1) / h
+  end
+end
+
+ManualGradCalc.lol()
+```
+
+```elixir
+h = 0.0001
+
+# grad: 1.0
+# dL = (l.data + h - l.data) / h
+dL = 1.0
+
+# dL/dd: f (-2.0)
+# 
+# manual proof:
+# (f(x + h) - f(x)) / h
+# ((d + h) * f - (d * f)) / h
+# (d * f + h * f - d * f) / h
+# (h * f) / h
+# f
+dL_dd = f.data
+
+# symmetrically:
+# dL/df: d (4.0)
+dL_df = d.data
+```
+
+### Calculus Chain Rule
+
+$\frac{dz}{dx} = \frac{dz}{dy} . \frac{dy}{dx}$
+
+> Intuitively, the chain rule states that knowing the instantaneous rate of change of z relative to y and that of y relative to x allows one to calculate the instantaneous rate of change of z relative to x as the product of the two rates of change.
+> 
+> If a car travels twice as fast as a bicycle and the bicycle is four times as fast as a walking man, then the car travels 2 × 4 = 8 times as fast as the man.
+
+[Wikipedia Chain Rule](https://en.wikipedia.org/wiki/Chain_rule)
+
+```elixir
+# dd/dc: 1
+#
+# d = c + e
+#
+# Manual proof
+#
+# (f(x + h) - f(x)) / h
+# ((c + h + e) - (c + e)) / h
+# (c + h + e - c - e) / h
+# h / h
+# 1.0
+dd_dc = 1.0
+dd_de = 1.0
+
+# dl/dc = (dl / dd) * (dd / dc)
+dL_dc = dL_dd * dd_dc
+
+# dl/de = (dl / dd) * (dd / de)
+dL_de = dL_dd * dd_de
+
+de_da = b.data
+dL_da = dL_de * de_da
+
+de_db = a.data
+dL_db = dL_de * de_db
+```
+
+```elixir
+a = %Value{data: 2.0, label: "a", grad: dL_da}
+b = %Value{data: -3.0, label: "b", grad: dL_db}
+c = %Value{data: 10.0, label: "c", grad: dL_dc}
+
+e = Value.mult(a, b, "e")
+e = %Value{e | grad: dL_de}
+
+d = Value.add(e, c, "d")
+d = %Value{d | grad: dL_de}
+
+f = %Value{data: -2.0, label: "f", grad: dL_df}
+
+l = Value.mult(d, f, "L")
+l = %Value{l | grad: dL}
+
+Mermaid.render_value(l)
+```
+
+### Single optimization step
+
+If we adjust each of the leaf nodes by some small step multiplied by their gradient we expect to see a positive movement in the final node.
+
+```elixir
+step = 0.01
+
+a = %Value{data: a.data + a.grad * step}
+b = %Value{data: b.data + b.grad * step}
+c = %Value{data: c.data + c.grad * step}
+f = %Value{data: f.data + f.grad * step}
+
+e = Value.mult(a, b, "e")
+d = Value.add(e, c, "d")
+l = Value.mult(d, f, "L")
+
+l.data
+```
+
+### Manual back propagation, a single neuron
+
+```elixir
+# Visualising the "squash" or "activation" function: tanh
+
+xs = for i <- 1..40, do: -5.0 + (0.25 * i)
+
+tanh_data = %{x: xs, y: Enum.map(xs, &:math.tanh/1)}
+
+VegaLite.new(width: 300, height: 200)
+|> VegaLite.data_from_values(tanh_data, only: ["x", "y"])
+|> VegaLite.mark(:line)
+|> VegaLite.encode_field(:x, "x", type: :quantitative)
+|> VegaLite.encode_field(:y, "y", type: :quantitative)
+```
+
+```elixir
+# Creating a single neron
+
+# Given two input neurons
+x1 = %Value{data: 2.0, label: "x1"}
+x2 = %Value{data: 0.0, label: "x2"}
+
+# And weights for each input
+w1 = %Value{data: -3.0, label: "w1"}
+w2 = %Value{data: 1.0, label: "w2"}
+
+# Bias of the neuron
+# The specific value is so backpropagation uses nice values
+b = %Value{data: 6.8813735870195432, label: "b"}
+
+x1w1 = Value.mult(x1, w1, "x1*w1")
+x2w2 = Value.mult(x2, w2, "x2*w2")
+
+x1w1x2w2 = Value.add(x1w1, x2w2, "x1*w1+x2*w2")
+
+n = Value.add(x1w1x2w2, b, "n")
+
+o = Value.tanh(n, "o")
+
+Mermaid.render_value(o)
+```
+
+```elixir
+d_o = 1.0
+
+# o = tanh_n
+# do/dn = 1 - tanh(n)**2
+# do/dn = 1 - o**2
+# do_dn = 1 - o.data ** 2 == 0.49999999999
+do_dn = 0.5
+
+# bias addition so just pass through
+do_x1w1x2w2 = 0.5
+do_b = 0.5
+
+do_x1w1 = 0.5
+do_x2w2 = 0.5
+
+do_x2 = w2.data * do_x2w2
+do_w2 = x2.data * do_x2w2
+
+do_x1 = w1.data * do_x1w1
+do_w1 = x1.data * do_x1w1
+```
+
+```elixir
+x1 = %Value{data: 2.0, label: "x1", grad: do_x1}
+x2 = %Value{data: 0.0, label: "x2", grad: do_x2}
+
+w1 = %Value{data: -3.0, label: "w1", grad: do_w1}
+w2 = %Value{data: 1.0, label: "w2", grad: do_w2}
+
+b = %Value{data: 6.8813735870195432, label: "b"}
+b = %Value{b | grad: do_b}
+
+x1w1 = Value.mult(x1, w1, "x1*w1")
+x1w1 = %Value{x1w1 | grad: do_x1w1}
+x2w2 = Value.mult(x2, w2, "x2*w2")
+x2w2 = %Value{x2w2 | grad: do_x2w2}
+
+x1w1x2w2 = Value.add(x1w1, x2w2, "x1*w1+x2*w2")
+x1w1x2w2 = %Value{x1w1x2w2 | grad: do_x1w1x2w2}
+
+n = Value.add(x1w1x2w2, b, "n")
+n = %Value{n | grad: do_dn}
+
+o = Value.tanh(n, "o")
+o = %Value{o | grad: d_o}
+
+Mermaid.render_value(o)
+```
+
+## Implementing the backward function
+
+```elixir
+# reset the neuron with the gradients
+x1 = %Value{data: 2.0, label: "x1"}
+x2 = %Value{data: 0.0, label: "x2"}
+
+w1 = %Value{data: -3.0, label: "w1"}
+w2 = %Value{data: 1.0, label: "w2"}
+
+b = %Value{data: 6.8813735870195432, label: "b"}
+
+x1w1 = Value.mult(x1, w1, "x1*w1")
+x2w2 = Value.mult(x2, w2, "x2*w2")
+
+x1w1x2w2 = Value.add(x1w1, x2w2, "x1*w1+x2*w2")
+
+n = Value.add(x1w1x2w2, b, "n")
+
+o = Value.tanh(n, "o")
+```
+
+```elixir
+defmodule TopologicalGraph do
+  def rebuild(topo_list) do
+    
+  end
+  
+  def build(value = %Value{}) do
+    {topo, _visited} = build(value, MapSet.new(), [])
+    Enum.reverse(topo)
+  end
+  
+  defp build(value, visited, topo) do
+    if Enum.member?(visited, value) do
+      {topo, visited}
+    else
+      visited = MapSet.put(visited, value)
+
+      IO.puts "#{value.label}"
+
+      {topo, visited} =
+        if is_nil(value.children) do
+          {topo, visited}
+        else
+          value.children
+          |> Tuple.to_list()
+          |> Enum.reduce({topo, visited}, fn child, acc ->
+            reduce(child, acc)
+          end)
+        end
+
+      {[value | topo], visited}
+    end
+  end
+
+  defp reduce(nil, acc), do: acc
+
+  defp reduce(child, {topo, visited}) do
+    build(child, visited, topo)
+  end
+end
+
+```
+
+```elixir
+TopologicalGraph.build(o)
+|> Enum.map(& &1.data)
+```
+
+```elixir
+# initialise the output node with a grad of 1.0
+o = %Value{o | grad: 1.0} |> Value.backward()
+```
+
+```elixir
+Mermaid.render_value(o)
+```
+
+Fixing bug where node is used multiple times
+
+```elixir
+a = %Value{data: 3.0, label: "a"}
+b = Value.add(a, a, "b")
+b= %Value{b | grad: 1.0} |> Value.backward()
+Mermaid.render_value(b)
+```
+
+```elixir
+a = %Value{data: -2.0, label: "a"}
+b = %Value{data: 3.0, label: "b"}
+d = Value.mult(a, b, "d")
+e = Value.add(a, b, "e")
+f = Value.mult(d, e, "f")
+f = %Value{f | grad: 1.0} |> Value.backward()
+
+Mermaid.render_value(f)
+```
